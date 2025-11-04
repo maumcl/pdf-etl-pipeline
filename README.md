@@ -30,8 +30,6 @@ Data Analysis & Visualization
 | PDF Processing | PyMuPDF / pdf2image |
 | Data Manipulation | pandas, numpy |
 | Database | PostgreSQL + psycopg2 |
-| Visualization | matplotlib / seaborn |
-| Cloud Storage (optional) | AWS S3 / GCS (future integration) |
 
 ---
 
@@ -39,7 +37,7 @@ Data Analysis & Visualization
 
 ### 1️⃣ Clone Repository
 ```bash
-git clone https://github.com/<your_username>/pdf-etl-pipeline.git
+git clone https://github.com/maumcl/pdf-etl-pipeline.git
 cd pdf-etl-pipeline
 ```
 
