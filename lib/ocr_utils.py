@@ -1,19 +1,5 @@
-import glob
-import pandas as pd
-import numpy as np
-import inspect
-import pdfplumber
-import os
-from pathlib import Path
-import unidecode
-import re
-from glob import glob
-from tqdm.notebook import tqdm
-from functools import reduce
-from datetime import datetime
-from PIL import Image, ImageOps, ImageFilter, ImageDraw
-import pytesseract
-
+from lib.ocr_utils import *
+from lib.parse_utils import *
 
 
 def extract_table_section(text_list):
@@ -93,7 +79,6 @@ def visualize_bboxes(image_path, df: pd.DataFrame,
             except Exception:
                 continue
 
-        display(image)
         print(f"✅ Displayed {len(subset)} boxes from {img_path.name} (scale={scale:.3f})")
 
     except Exception as e:

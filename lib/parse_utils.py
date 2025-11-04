@@ -107,7 +107,6 @@ def extract_tax_rate(tax_label):
     match = re.search(r"(\d+\.?\d*)\s*%", str(tax_label))
     return float(match.group(1)) if match else None
 
-
 def fix_null_total(df):
     """If total_amount is missing, compute subtotal + tax."""
     if "total_amount" in df.columns:
@@ -178,16 +177,27 @@ def extract_invoice_metadata(text_list):
     subtotal = tax_label = tax_amount = total_amount = None
 
     for line in text_list:
+        u = line.strip().upper()
+
+        # --- Supplier TIN ---
         if not supplier_tin:
-            m = re.search(r"TIN[:\s]+(\d+)", line, re.IGNORECASE)
+            m = re.search(r"(?<!G)TIN[:\s]+(\d+)", line, re.IGNORECASE)
             if m:
                 supplier_tin = m.group(1)
 
+        # --- Invoice Number (now robust for GST ID No :001092886528) ---
         if not invoice_number:
-            m = re.search(r"INVOICE\s*#\s*(\d+)", line, re.IGNORECASE)
+            # common direct forms
+            m = re.search(r"\b(?:INVOICE|RECEIPT|TAX\s*INVOICE)\s*#?\s*[:\-]?\s*([A-Z]?\d{3,})\b", u)
             if m:
                 invoice_number = m.group(1)
+            else:
+                # pattern like R0000183898 or T000011248
+                m2 = re.search(r"\b[RT]\d{6,}\b", u)
+                if m2:
+                    invoice_number = m2.group(0)
 
+        # --- Invoice & Due Dates ---
         if not invoice_date:
             m = re.search(r"Invoice Date[:\s]+(.+)", line, re.IGNORECASE)
             if m:
@@ -198,6 +208,7 @@ def extract_invoice_metadata(text_list):
             if m:
                 due_date = parse_date(m.group(1))
 
+        # --- Client Info ---
         if "Bill to" in line:
             idx = text_list.index(line)
             client_name = text_list[idx + 2].strip() if len(text_list) > idx + 2 else None
@@ -208,21 +219,67 @@ def extract_invoice_metadata(text_list):
             if m:
                 client_tin = m.group(1)
 
-        if re.search(r"Sub\s*Total", line, re.IGNORECASE):
-            m = re.search(r"([\d,.]+)$", line)
-            if m:
-                subtotal = parse_float(m.group(1))
+    # --- Subtotal ---
+        if re.search(r"Sub\s*Total|TOTAL", line, re.IGNORECASE):
+            # Find all numbers in the line
+            numbers = re.findall(r"\d+[,.]?\d*", line)
+            if numbers:
+                # Take the last number found (usually the amount)
+                subtotal = parse_float(numbers[-1])
+                total_amount = parse_float(numbers[0])
+                
+            
 
-        if re.search(r"GST", line, re.IGNORECASE):
-            parts = line.split()
-            if len(parts) >= 3:
-                tax_label = parts[0] + " " + parts[1]
-                tax_amount = parse_float(parts[-1])
+               
+        # --- GST / Tax ---
+        if re.search(r"GST", line, re.IGNORECASE) and not re.search(r"\bTOTAL\b", line, re.IGNORECASE):
+            # Normalize
+            u = line.replace("％", "%").replace("°", "%").replace("‰", "%")
 
-        if re.search(r"Total\s*$", line, re.IGNORECASE):
-            m = re.search(r"([\d,.]+)$", line)
-            if m:
-                total_amount = parse_float(m.group(1))
+            # Extract all numeric values
+            numbers = re.findall(r"\d+(?:[.,]\d+)?", u)
+            values = [parse_float(x) for x in numbers if parse_float(x) is not None]
+
+            # Skip invalid or single-value GST lines (like GST@6%)
+            if len(values) >= 2:
+                # Typical patterns: [2.55, 6.0, 42.45]  or  [0.22, 3.68, 6.0]
+                values_sorted = sorted(values)
+
+                # If one of the numbers is a "rate" (5–15 %), ignore it
+                rates = [v for v in values_sorted if 4.0 <= v <= 15.0]  # GST/VAT rates are usually 4–15 %
+                non_rates = [v for v in values_sorted if v not in rates]
+
+                if len(non_rates) >= 2:
+                    # Usually smaller number = tax, larger = subtotal
+                    non_rates_sorted = sorted(non_rates)
+                    tax_amount = non_rates_sorted[0]
+                    subtotal = non_rates_sorted[-1]
+                elif len(non_rates) == 1 and rates:
+                    # one numeric + one rate → treat numeric as subtotal, tax = subtotal * rate/100
+                    subtotal = non_rates[0]
+                    tax_amount = round(subtotal * (rates[-1] / 100), 2)
+                else:
+                    # fallback: smallest = tax, largest = subtotal
+                    tax_amount = values_sorted[0]
+                    subtotal = values_sorted[-1]
+
+                tax_label = f"GST {rates[-1]}%" if rates else "GST"
+
+                if tax_label:
+                    m = re.search(r"(\d+(?:\.\d+)?)", str(tax_label))
+                    if m:
+                        tax_label = float(m.group(1))
+
+
+
+
+
+    try:
+        if subtotal and tax_amount and tax_amount > subtotal:
+            subtotal, tax_amount = tax_amount, subtotal
+    except Exception:
+        pass
+
 
     return {
         "supplier_name": supplier_name,
@@ -233,8 +290,7 @@ def extract_invoice_metadata(text_list):
         "invoice_number": invoice_number,
         "invoice_date": invoice_date,
         "due_date": due_date,
-        "subtotal_amount": subtotal,
-        "tax_label": extract_tax_rate(tax_label),
+        "tax_label": tax_label,
         "tax_amount": tax_amount,
         "total_amount": total_amount,
     }
@@ -322,7 +378,7 @@ def extract_product_info(df_ocr: pd.DataFrame, company_id: int, country: str, pr
     re.compile(r"^(?P<price>\d+(?:[.,]\d{1,2}))\s+(?P<qty>\d+)\s*(?:X|x)\s*(?P<total>\d+(?:[.,]\d{1,2}))"),
 
     # qty X price total       → "1 X 29.90 29.90" or "1X 8.90 8.90"  (qty max 3 digits)
-    re.compile(r"^(?P<qty>\d{1,3})\s*(?:X|x)\s*(?P<price>\d+(?:[.,]\d{1,2}))\s+(?P<total>\d+(?:[.,]\d{1,2}))"),
+    re.compile(r"^(?P<qty>\d{1,3})\s*(?:X|x)\s*(?P<price>\d+(?:[.,]\d{1,2}))\s*(?P<total>\d+(?:[.,]\d{1,2}))"),
 
     # price ... qty X total   → "8.98 6942131561408 1X 8.90"
     re.compile(r"^(?P<price>\d+(?:[.,]\d{1,2})).*?(?P<qty>\d+)\s*(?:X|x)\s*(?P<total>\d+(?:[.,]\d{1,2}))"),
@@ -420,7 +476,7 @@ def extract_product_info(df_ocr: pd.DataFrame, company_id: int, country: str, pr
     
 
     # ---------- MAIN EXTRACTION ----------
-    def _extract(df_ocr: pd.DataFrame, lookback=3):
+    def _extract(df_ocr: pd.DataFrame, lookback=6):
         lines = df_ocr["line"].tolist()
 
         # -------- SUPPLIER INFO --------
@@ -431,7 +487,7 @@ def extract_product_info(df_ocr: pd.DataFrame, company_id: int, country: str, pr
             u = line.upper().strip()
 
             # Detect supplier name (company header)
-            if any(k in u for k in ["SDN BHD", "SON BHD", "SON BHO", "LTD", "ENTERPRISE", "COMPANY"]):
+            if any(k in u for k in ["BHD SON", "SDN BHD", "SON BHD", "SON BHO", "LTD", "ENTERPRISE", "COMPANY"]):
                 supplier_name = line.strip()
 
             # If not found yet, check if first few lines look like name + address
@@ -484,20 +540,63 @@ def extract_product_info(df_ocr: pd.DataFrame, company_id: int, country: str, pr
 
 
         # -------- TAX INFO --------
-        tax_label = tax_amount = subtotal_amount = total_amount = None
-        for line in lines:
-            if "GST" in line.upper():
-                # detect tax rate
-                m_rate = re.search(r"@?\s*(\d+)%", line)
-                if m_rate:
-                    tax_label = float(m_rate.group(1))
-                # detect subtotal + tax in GST Summary
-                nums = re.findall(r"\d+[.,]\d+", line)
-                if len(nums) >= 2:
-                    subtotal_amount = _norm_num(nums[0])
-                    tax_amount = _norm_num(nums[1])
+        tax_label = tax_amount = total_amount = None
 
-            # detect "TOTAL INCL. GST@6%" or similar
+        for line in lines:
+            u = line.upper().strip()  
+    
+
+            # --- GST summary or tax line ---
+                       
+            # Match GST lines but ignore totals
+            if re.search(r"GST\s*[S@]?\s*\d+", u, re.IGNORECASE) and not re.search(r"\bTOTAL\b", u, re.IGNORECASE):
+
+                # Extract all numeric values
+                nums = re.findall(r"\d+(?:[.,]\d+)?", u)
+                clean_nums = [float(x.replace(",", ".")) for x in nums]
+
+
+                # GST summary usually has ≥2 numbers (subtotal + tax) or keywords
+                if len(clean_nums) >= 2 or re.search(r"SUMMARY|AMT|TAX", u, re.IGNORECASE):
+
+                    # --- Extract GST rate (handles GST6 / GST@6% / GST S6 etc.) ---
+                    m_rate = re.search(r"GST\s*[S@]?\s*(\d+(?:[.,]\d+)?)(?:\s*%?)", u, re.IGNORECASE)
+                    if m_rate:
+                        tax_label = float(m_rate.group(1))
+
+
+                    # --- Determine subtotal vs tax ---
+                    if len(clean_nums) >= 2:
+                        # The smaller value is tax, larger is subtotal
+                        vals = sorted(clean_nums)
+                        tax_amount = vals[0]
+                    elif len(clean_nums) == 1:
+                        tax_amount = 0.0
+
+                # Extract all numbers
+                nums = re.findall(r"\d+[.,]?\d*", u)
+                nums = [n for n in nums if n.strip()]
+
+                # Skip the GST rate (first small number like 6 or 5)
+                if len(nums) >= 3 and float(nums[0]) in (5.0, 6.0, 7.0):
+                    nums = nums[1:]
+
+                # Detect pattern: smallest number before 'GST' → tax amount
+            if "GST" in u:
+                parts = re.split(r"GST", u)
+                before_gst = parts[0]
+                nums_before_gst = re.findall(r"\d+[.,]?\d*", before_gst)
+                
+
+                if len(nums_before_gst) >= 2:
+                    # pick smaller one as tax (e.g. 2.55 from "2.55 S@6% 42.45 GST")
+                    vals = [_norm_num(x) for x in nums_before_gst]
+                    tax_amount = min(vals)
+                    tax_label = vals[1]
+                elif len(nums_before_gst) == 1:
+                    tax_amount = _norm_num(nums_before_gst[0])
+
+                # detect "TOTAL INCL. GST@6%" or similar
             if "TOTAL INCL" in line.upper() and re.search(r"\d+[.,]\d+", line):
                 nums = re.findall(r"\d+[.,]\d+", line)
                 if nums:
@@ -505,58 +604,107 @@ def extract_product_info(df_ocr: pd.DataFrame, company_id: int, country: str, pr
 
                     
 
+
         # -------- INVOICE INFO --------
         invoice_number = None
         invoice_date = None
         payment_method = None
 
-        for line in lines:
-            # date: 24-11-17, 2025-03-09, 24-11-17 13:11
-            m_date = re.search(r"\b(\d{2}[-/]\d{2}[-/]\d{2,4}(?:\s+\d{1,2}:\d{2})?)\b", line)
-            if m_date and not invoice_date:
-                invoice_date = m_date.group(1)
+        def _bad_context(s: str) -> bool:
+            u = s.upper()
+            return any(k in u for k in ["GST", "GST ID", "CO-REG", "CO REG", "COREG", "REG ", "FREE", "ML", "DRILL", "CLAMP", "CLOG"])
 
-            # invoice number
-            m_inv = re.search(r"\b(?:INV|R|T|NO[:\s]*)?(\d{5,})\b", line, re.IGNORECASE)
-            if m_inv and ("INV" in line.upper() or "R" in line.upper() or "T" in line.upper()):
-                invoice_number = m_inv.group(1)
+        for i, line in enumerate(lines):
+            u = line.upper().strip()
 
-            # payment
-            if any(k in line.upper() for k in ["CASH", "CARD", "VISA", "MASTERCARD"]):
+            # --- date (dd-mm-yy[yy] with optional time) ---
+            if not invoice_date:
+                m_date = re.search(r"\b(\d{2}[-/]\d{2}[-/]\d{2,4})(?:\s+\d{1,2}:\d{2})?\b", u)
+                if m_date:
+                    invoice_date = m_date.group(1)
+
+            # --- payment hint ---
+            if any(k in u for k in ["CASH", "CARD", "VISA", "MASTERCARD"]) and not payment_method:
                 payment_method = line.strip()
 
-           # date: 24-11-17, 2025-03-09, 28-03-18 18:05
-            m_date = re.search(r"\b(\d{2}[-/]\d{2}[-/]\d{2,4})(?:\s+\d{1,2}:\d{2})?\b", line)
-            if m_date and not invoice_date:
-                invoice_date = m_date.group(1)
+            # --- Step 1: explicit GST or invoice ID formats ---
+            if not invoice_number:
+                # Handle patterns like ":000473792512) (GST ID No"
+                m_gst = re.search(r"[:(]?\s*0*(\d{6,})\s*\)?\s*\(?\s*GST\s*ID", u, re.IGNORECASE)
+                if m_gst:
+                    invoice_number = m_gst.group(1)
+                    continue
 
-            # invoice number like T2 R0000246362
-            m_inv = re.search(r"\bR0*\d{5,}\b", line, re.IGNORECASE)
-            if m_inv:
-                invoice_number = m_inv.group(0)
-
-                # Fallback: use DATE_PATTERNS and INVOICE_NUMBER_PATTERNS if still missing
-        if not invoice_date or not invoice_number:
-            invoice_date = _find_invoice_date(lines)
+                # Standard GST ID formats
+                m_gst2 = re.search(r"GST\s*ID\s*No\s*[:\-]?\s*0*(\d{6,})", u, re.IGNORECASE)
+                if m_gst2:
+                    invoice_number = m_gst2.group(1)
+                    continue
 
             if not invoice_number:
-                for pat in INVOICE_NUMBER_PATTERNS:
-                    m = pat.search(line)
-                    if m:
-                        invoice_number = m.group("invoice_number")
+                m = re.search(r"\b(?:INVOICE|INV|RECEIPT)\s*(?:NO|#|:)?\s*([A-Z0-9-]{5,})\b", u)
+                if m:
+                    candidate = m.group(1)
+                    # sanity check: must contain ≥3 digits
+                    if len(re.findall(r"\d", candidate)) >= 3:
+                        invoice_number = candidate
+                        continue
+
+            if not invoice_number:
+                m = re.search(r"\bNO[:#]?\s*([A-Z0-9-]{5,})\b", u)
+                if m:
+                    candidate = m.group(1)
+                    if len(re.findall(r"\d", candidate)) >= 3:
+                        invoice_number = candidate
+                        continue
+
+        # --- Step 2: cross-line fallback (only if still None) ---
+        if not invoice_number:
+            for i, line in enumerate(lines):
+                u = line.upper().strip()
+                if _bad_context(u):
+                    continue
+                # must clearly be an invoice header (avoid short "INV" fragments)
+                if re.fullmatch(r"(INVOICE|INVOICE NO[:#]?|INV NO[:#]?)", u):
+                    nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+                    un = nxt.upper()
+                    # reject codes or descriptions
+                    if not _bad_context(un) and re.match(r"^[A-Z0-9-]{5,}$", un):
+                        invoice_number = nxt.strip()
                         break
 
-                # --- Normalize and clean the invoice_date safely ---
+        # final cleanup
+        if invoice_number:
+            m = re.search(r"\b([A-Z]?\d[A-Z0-9]+)\b", invoice_number)
+            if m:
+                invoice_number = m.group(1)
+
+        # normalize date safely
         if invoice_date:
             try:
-                # handles 2-digit or 4-digit years and mixed separators
                 invoice_date = pd.to_datetime(invoice_date, dayfirst=True, errors="coerce")
             except Exception:
                 invoice_date = None
-
-        # replace NaT with None (for DB insert)
         if pd.isna(invoice_date):
             invoice_date = None
+
+        # final cleaning: strip trailing decorations like "-W)" or ")"
+        if invoice_number:
+            # keep core token (letters/digits only, preserve leading R/T and digits; drop trailing -W, ), etc.)
+            m = re.search(r"\b([A-Z]?\d[A-Z0-9]+)\b", invoice_number)
+            if m:
+                invoice_number = m.group(1)
+
+        # normalize date safely
+        if invoice_date:
+            try:
+                invoice_date = pd.to_datetime(invoice_date, dayfirst=True, errors="coerce")
+            except Exception:
+                invoice_date = None
+        if pd.isna(invoice_date):
+            invoice_date = None
+
+
 
 
 
@@ -574,14 +722,15 @@ def extract_product_info(df_ocr: pd.DataFrame, company_id: int, country: str, pr
 
         def _looks_like_desc(line: str) -> bool:
             u = line.upper().strip()
-            # must contain at least 2 letters to be a real description
-            if not re.search(r"[A-Za-z].*[A-Za-z]", u):
+            # allow alphanumeric lines (letters or digits), so we don’t drop codes like JH51/3-63 or LG12-24
+            if not re.search(r"[A-Za-z0-9]", u):
                 return False
-            if _is_price_like(u) or _is_code_like(u):
+            if _is_price_like(u):
                 return False
             if _is_header(u) or _is_noise(u):
                 return False
             return True
+
 
         for i, line in enumerate(lines):
             if _is_noise(line):
@@ -593,19 +742,24 @@ def extract_product_info(df_ocr: pd.DataFrame, company_id: int, country: str, pr
             desc_lines = []
             for j in range(i - 1, max(0, i - lookback) - 1, -1):
                 cand = lines[j].strip()
-                # stop if we hit totals or other price-like lines
+                u = cand.upper()
+
+                # stop scanning if we hit totals or headers
                 if _is_header(cand) or _is_price_like(cand):
                     break
-                if _looks_like_desc(cand):
+
+                # Accept descriptive or semi-code lines (letters, numbers, dashes, plus signs)
+                if re.search(r"[A-Za-z]", cand) or re.search(r"[\d\-+/]", cand):
                     desc_lines.insert(0, cand)
-                elif _is_code_like(cand):
-                    # keep codes just above, but don’t let them start a new merge
-                    continue
                 else:
                     break
 
-            desc = " ".join(desc_lines).strip() or "UNNAMED ITEM"
+            # Merge multi-line product descriptions
+            desc = " ".join(desc_lines).strip()
+            desc = re.sub(r"\s{2,}", " ", desc)  # normalize spaces
             desc = re.sub(r"^\s*(TAX\s+INVOICE\b[–—-]?\s*)", "", desc, flags=re.I)
+            desc = desc or "UNNAMED ITEM"
+
 
             items.append({
                 "description": desc,
@@ -615,9 +769,12 @@ def extract_product_info(df_ocr: pd.DataFrame, company_id: int, country: str, pr
             })
 
         df_products = pd.DataFrame(items)
+        
         if not df_products.empty:
-            subtotal_amount = subtotal_amount or df_products["total"].sum()
-            total_amount = subtotal_amount + (tax_amount or 0)
+            subtotal_amount = df_products["total"].sum()
+            total_amount = subtotal_amount
+
+
 
         # -------- FINAL MERGED ROWS --------
         records = []
@@ -638,12 +795,10 @@ def extract_product_info(df_ocr: pd.DataFrame, company_id: int, country: str, pr
                 "qty": row["qty"],
                 "price": row["price"],
                 "total": row["total"],
-                "subtotal_amount": subtotal_amount,
                 "tax_label": tax_label,
                 "tax_amount": tax_amount,
                 "total_amount": total_amount,
-                "file": file_path,
-                "row_number": idx + 1
+                "file": file_path
             })
 
         df_final = pd.DataFrame(records)

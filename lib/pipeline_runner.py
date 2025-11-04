@@ -1,6 +1,3 @@
-from pathlib import Path
-import pandas as pd
-import pdfplumber
 from lib.ocr_utils import *
 from lib.parse_utils import *
 
@@ -50,7 +47,7 @@ def run_extraction_pipeline(pdf_path, company_id, country, processed_date):
             if entity_path.exists():
                 df_entities = read_entities(entity_path)
                 print(f"✅ Loaded entity data from {entity_path.name}:")
-                display(df_entities)
+                
             else:
                 df_entities = pd.DataFrame(columns=["company_id", "address", "date", "total"])
 
@@ -79,11 +76,6 @@ def run_extraction_pipeline(pdf_path, company_id, country, processed_date):
         metadata = extract_invoice_metadata(text_list)
         table_lines = extract_table_section(text_list)
 
-        if not table_lines:
-            print(f"⚠️ No product table found in {path}")
-            continue
-
-        print(f"🧾 Found {len(table_lines)} potential item lines.")
 
         # --- Parse and append structured lines ---
         for line in table_lines:
