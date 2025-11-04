@@ -96,7 +96,3 @@ Once the data is in PostgreSQL, you can perform the following analyses:
 ---
 
 
-
-## 📧 Contact
-
-For questions or support, reach out at [your-email@example.com]
