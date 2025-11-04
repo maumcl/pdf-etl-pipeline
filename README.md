@@ -1,24 +1,3 @@
-# 🧾 PDF / Image Invoice ETL Pipeline
-
-## 📖 Overview
-This project automates the extraction and analysis of structured information from **PDF or image invoices/receipts**.  
-It uses **OCR (Optical Character Recognition)**, regex-based parsing, and metadata extraction to convert raw unstructured documents into clean, structured tabular data — which is then stored in a **PostgreSQL database** for further analytics.
-
----
-
-## 🚀 Features
-
-- 🔍 **OCR Text Extraction:** Converts scanned receipts and PDFs into text using Tesseract.  
-- 🧠 **Entity Parsing:** Extracts supplier, TIN, invoice number, date, totals, taxes, and line items.  
-- 🧮 **Data Normalization:** Cleans, validates, and standardizes all numerical and textual fields.  
-- 🗃️ **Database Loading:** Inserts structured data into PostgreSQL (`invoices` table).  
-- 📊 **Exploratory Analysis:** Performs basic analytics on loaded invoices and line items.
-
----
-
-## 🧩 Pipeline Architecture
-
-```text
 Raw PDFs / JPGs
         ↓
 OCR Processing (Tesseract / PyMuPDF)
