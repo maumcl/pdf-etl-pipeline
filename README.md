@@ -88,9 +88,9 @@ This command will:
 
 Once the data is in PostgreSQL, you can perform the following analyses:
 
-- **Spending trends** over time
-- **Supplier analysis** and vendor comparisons
-- **Tax compliance** reporting
+- **Spending trends** monitor totals over time
+- **Supplier analysis** compare vendors by total spend
+- **Tax compliance** validate tax amounts
 - **Budget forecasting** and anomaly detection
 
 ---
