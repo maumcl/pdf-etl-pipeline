@@ -26,10 +26,10 @@ Data Analysis & Visualization
 | Component | Technology |
 |-----------|------------|
 | Language | Python 3.9+ |
-| OCR | pytesseract, OpenCV |
-| PDF Processing | PyMuPDF / pdf2image |
+| OCR | pytesseract, PIL |
+| PDF Processing | pdfplumber |
 | Data Manipulation | pandas, numpy |
-| Database | PostgreSQL + psycopg2 |
+| Database | PostgreSQL |
 
 ---
 
