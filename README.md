@@ -1,4 +1,4 @@
-# PDF Invoice OCR & ETL Pipeline
+# PDF/JPG Invoice OCR & ETL Pipeline
 
 An automated pipeline for extracting, parsing, and storing invoice data from raw PDFs and images into a structured PostgreSQL database.
 
