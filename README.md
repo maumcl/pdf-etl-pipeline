@@ -79,7 +79,7 @@ This command will:
 
 | company_id | supplier_name | invoice_number | invoice_date | subtotal_amount | tax_amount | total_amount |
 |------------|---------------|----------------|--------------|-----------------|------------|--------------|
-| 1 | MR. D.I.Y. SDN BHD | 000306020352 | 2018-03-12 | 42.45 | 2.55 | 45.00 |
+| 1 | MR. D.I.Y. SDN BHD | 000306020352 | 2017-03-10 | 15.35 | 2.85 | 15.00 |
 | 1 | PYEDRAIN SUPPLIER | R000183898 | 2018-03-12 | 42.45 | 2.55 | 45.00 |
 
 ---
