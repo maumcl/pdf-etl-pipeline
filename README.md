@@ -28,7 +28,7 @@ Data Analysis & Visualization
 | Language | Python 3.9+ |
 | OCR | pytesseract, PIL |
 | PDF Processing | pdfplumber |
-| Data Manipulation | pandas, numpy |
+| Data Manipulation | pandas, numpy, unidecode |
 | Database | PostgreSQL |
 
 ---
