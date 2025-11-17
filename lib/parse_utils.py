@@ -801,8 +801,1145 @@ def extract_product_info(df_ocr: pd.DataFrame, company_id: int, country: str, pr
                 "file": file_path
             })
 
+
         df_final = pd.DataFrame(records)
         return df_final
     
  
     return _extract(df_ocr)
+
+
+def extract_nc_header(text_list):
+
+    state_header = None
+    owner_header = None
+
+    # normalmente está nas primeiras linhas
+    for line in text_list[:15]:
+        u = line.upper().strip()
+        if "STATE OF" in u and state_header is None:
+            state_header = line.strip()
+        if "DEPARTMENT OF" in u and owner_header is None:
+            owner_header = line.strip()
+
+        if state_header and owner_header:
+            break
+
+    return state_header, owner_header
+
+
+
+def parse_nc_award_letter(text_list, company_id, country, processed_date, file_path):
+    """
+    Parser para 'Notification of Award' / 'Award Letter' da North Carolina DOT.
+        Contract No.   DA00569
+        TIP No.:       None
+        Federal Aid No.: State Funded
+        County:        Craven
+        Description:   Work Barge Skyco Drydock
+    """
+    full_text = "\n".join(text_list)
+    state_header, owner_header = extract_nc_header(text_list)
+    contract_id = None
+    federal_aid_no = None
+    project_number = None
+    county = None
+    description = None
+    vendor = None
+    letting_date = None
+    award_value = None
+
+    # -------- linhas tipo "label: valor" --------
+    for line in text_list:
+        raw = line.strip()
+        u = raw.lower()
+
+        if "contract no." in u and contract_id is None:
+            parts = re.split(r"contract no\.", raw, flags=re.IGNORECASE)
+            if len(parts) > 1:
+                contract_id = parts[1].strip()
+
+        if "federal aid no" in u and federal_aid_no is None:
+            parts = re.split(r"federal aid no\.?:", raw, flags=re.IGNORECASE)
+            if len(parts) > 1:
+                federal_aid_no = parts[1].strip()
+
+
+        if (u.startswith("county") or u.startswith("counties")) and county is None:
+            parts = re.split(r"(count(y|ies))(?:\s*\/\s*district)?[:\.]?\s*", raw, flags=re.IGNORECASE)
+            if len(parts) > 1:
+                county = parts[-1].strip()
+
+        if u.startswith("description") and description is None:
+            parts = re.split(r"description[:\.]?", raw, flags=re.IGNORECASE)
+            if len(parts) > 1:
+                description = parts[1].strip()
+
+    # -------- vendor, data, valor --------
+    m_vendor = re.search(
+        r"inform you that\s+(.+?)\s+has been",
+        full_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if m_vendor:
+        vendor = m_vendor.group(1).strip()
+
+    m_date = re.search(
+        r"bid submitted on\s+([A-Za-z]+\s+\d{1,2},\s+\d{4})",
+        full_text,
+        flags=re.IGNORECASE,
+    )
+    if m_date:
+        letting_date_raw = m_date.group(1).strip()
+        letting_date = parse_date(letting_date_raw) or letting_date_raw
+
+    # -------- award_value  --------
+    m_value = re.search(
+        r"amount\b.*?\$?\s*([\d,]+\.\d{2})",
+        full_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    if m_value:
+        award_value = parse_float(m_value.group(1))
+    else:
+        for i, line in enumerate(text_list):
+            low = line.lower()
+            if "amount" in low:
+                m_same = re.search(r"\$?\s*([\d,]+\.\d{2})", line)
+                if m_same:
+                    award_value = parse_float(m_same.group(1))
+                    break
+
+                if i + 1 < len(text_list):
+                    next_line = text_list[i + 1]
+                    m_next = re.search(r"\$?\s*([\d,]+\.\d{2})", next_line)
+                    if m_next:
+                        award_value = parse_float(m_next.group(1))
+                        break
+
+
+    data = {
+        "company_id": company_id,
+        "country": country,
+        "processed_date": processed_date,
+        "file": file_path,
+        "doc_type": "nc_award_letter",
+        "contract_id": contract_id,
+        "state_header": state_header,         
+        "owner_header": owner_header,  
+        "project_number": federal_aid_no,
+        "county": county,
+        "description": description,
+        "vendor": vendor,
+        "letting_date": letting_date,
+        "award_value": award_value,
+    }
+
+    print("   ➜ NC Award Letter parsed:", data)  
+    return [data]
+
+
+def parse_nc_bids_as_read(text_list, company_id, country, processed_date, file_path):
+    """
+    Parser for NC DOT 'CONTRACT BIDS AS READ'.
+
+    Returns one row per contractor:
+        state_header, owner_header,
+        letting_date, letting_time,
+        contract_id,
+        description,
+        counties,
+        engineers_estimate,
+        total_bids_received,
+        contractor_name, amount_bid
+    """
+
+
+    full_text = "\n".join(text_list)
+    lines = [l.strip() for l in text_list if l.strip()]
+    # headers
+    state_header, owner_header = extract_generic_owner_header(text_list)
+
+    letting_date = None
+    letting_time = None
+    contract_id = None
+    description = None
+    counties = None
+    engineers_estimate = None
+    total_bids_received = None
+
+    # ---------- LETTING DATE ----------
+
+    for i, raw in enumerate(lines):
+        if raw.lower().startswith("bid opening"):
+            # pode estar na mesma linha:
+            m = re.search(r"(\d{1,2}/\d{1,2}/\d{4})", raw)
+            if not m and i + 1 < len(lines):
+                m = re.search(r"(\d{1,2}/\d{1,2}/\d{4})", lines[i + 1])
+            if m:
+                letting_date = m.group(1)
+        if raw.lower().startswith("time") and letting_time is None:
+            m = re.search(r"(\d{1,2}:\d{2}\s*[AP]M)", raw, flags=re.IGNORECASE)
+            if m:
+                letting_time = m.group(1)
+
+    # fallback: primeira data mm/dd/yyyy
+    if letting_date is None:
+        m = re.search(r"(\d{1,2}/\d{1,2}/\d{4})", full_text)
+        if m:
+            letting_date = m.group(1)
+
+    # ---------- CONTRACT ID ----------
+    for i, raw in enumerate(lines):
+        if raw.lower().startswith("contract"):
+            print(raw)
+            m = re.search(r"(\d{5,})", raw)
+            if not m and i + 1 < len(lines):
+                m = re.search(r"(\d{5,})", lines[i + 1])
+            if m:
+                contract_id = m.group(1)
+                break
+
+    # ---------- DESCRIPTION multiline ----------
+    for i, raw in enumerate(lines):
+        if raw.lower().startswith("description"):
+            desc = raw.split(":", 1)[-1].strip()
+            collected = [desc] if desc else []
+
+            j = i + 1
+            while j < len(lines):
+                nxt = lines[j]
+                # para quando chega em "CONTRACTOR"
+                if nxt.upper().startswith("CONTRACTOR"):
+                    break
+                # ignora linhas brancas
+                if nxt.strip():
+                    collected.append(nxt)
+                j += 1
+            description = " ".join(collected).strip()
+            break
+
+    # ---------- ENGINEER'S ESTIMATE ----------
+    m = re.search(r"ENGINEERS ESTIMATE\s*\$?\s*([\d,]+\.\d{2})", full_text, flags=re.IGNORECASE)
+    if m:
+        engineers_estimate = parse_float(m.group(1))
+
+    # ---------- TOTAL BIDS RECEIVED ----------
+    m = re.search(r"TOTAL BIDS RECEIVED[:\s]*\(?(\d+)\)?", full_text, flags=re.IGNORECASE)
+    if m:
+        total_bids_received = int(m.group(1))
+
+    # ---------- CONTRACTOR + AMOUNT ----------
+    records = []
+    money_re = re.compile(r"\$?\s*([\d,]+\.\d{2})")
+
+    for raw in lines:
+        # se não tem valor, ignora
+        m = money_re.search(raw)
+        if not m:
+            continue
+
+        amount = parse_float(m.group(1))
+
+        # contractor name é o texto antes do valor
+        contractor = raw[:m.start()].strip()
+
+        # filtrar linhas inválidas
+        if contractor.upper() in ["CONTRACTOR", "AMOUNT BID"]:
+            continue
+
+        if contractor and amount is not None:
+            records.append({
+                "company_id": company_id,
+                "country": country,
+                "processed_date": processed_date,
+                "file": file_path,
+                "doc_type": "nc_bids_as_read",
+                "state_header": state_header,
+                "owner_header": owner_header,
+                "letting_date": letting_date,
+                "letting_time": letting_time,
+                "contract_id": contract_id,
+                "description": description,
+                "counties": counties,
+                "engineers_estimate": engineers_estimate,
+                "total_bids_received": total_bids_received,
+                "contractor_name": contractor,
+                "amount_bid": amount,
+            })
+
+    # fallback if nothing parsed
+    if not records:
+        records.append({
+            "company_id": company_id,
+            "country": country,
+            "processed_date": processed_date,
+            "file": file_path,
+            "doc_type": "nc_bids_as_read",
+            "state_header": state_header,
+            "owner_header": owner_header,
+            "letting_date": letting_date,
+            "letting_time": letting_time,
+            "contract_id": contract_id,
+            "description": description,
+            "counties": counties,
+            "engineers_estimate": engineers_estimate,
+            "total_bids_received": total_bids_received,
+            "contractor_name": None,
+            "amount_bid": None,
+        })
+
+    print(f"   ➜ NC Bids As Read parsed {len(records)} rows")
+    return records
+
+
+
+
+def parse_nc_bid_tabs(text_list, company_id, country, processed_date, file_path):
+    """
+    Parser for 'Bid Tabs' da NCDOT 
+    """
+    if not text_list:
+        return [{
+            "company_id": company_id,
+            "country": country,
+            "processed_date": processed_date,
+            "file": file_path,
+            "doc_type": "nc_bid_tabs",
+            "state_header": None,
+            "owner_header": None,
+            "letting_date": None,
+            "contract_id": None,
+            "project_number": None,
+            "proposal_project_type": None,
+            "location": None,
+            "call_number": None,
+            "counties": None,
+            "description_header": None,
+            "line_no": None,
+            "sect_no": None,
+            "item_no": None,
+            "description": None,
+            "qty": None,
+            "unit": None,
+            "bidder_index": None,
+            "bidder_name": None,
+            "unit_price": None,
+            "amount": None,
+        }]
+
+    full_text = "\n".join(text_list)
+    state_header, owner_header = extract_nc_header(text_list)
+
+    # ---------- Letting Date (ex.: May 03, 2023) ----------
+    letting_date = None
+    m_date = re.search(r"([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})", full_text)
+    if m_date:
+        letting_raw = m_date.group(1).strip()
+        letting_date = parse_date(letting_raw) or letting_raw
+
+    # ---------- Contract ID (ex.: DA00569) ----------
+    contract_id = None
+    m_contract = re.search(r"\b(DA\d{5,})\b", full_text)
+    if m_contract:
+        contract_id = m_contract.group(1)
+
+# ---------- Call Number ----------
+    call_number = None
+
+ 
+    for line in text_list:
+        m = re.search(r"\bCall\s+Number\s+(\d+)\b", line, flags=re.IGNORECASE)
+        if m:
+            call_number = m.group(1)
+            break
+
+    #    ex.: "May 03, 2023 2:30 PM ... 1 / 2 002"
+    if call_number is None:
+        for line in text_list[:10]: 
+            if re.search(r"\b\d+\s*/\s*\d+\b", line):
+                m2 = re.search(r"(\d{1,3})\s*$", line)
+                if m2:
+                    call_number = m2.group(1)
+                    break
+
+    # ---------- FED AID NO / Project Number / Proposal Type / Location ----------
+    project_number = None
+    proposal_project_type = None
+    location = None
+
+    for i, line in enumerate(text_list):
+        u = line.upper()
+
+        if "FED AID" in u:
+            m_same = re.search(r"FED AID NO[:\s]*(.*)", line, flags=re.IGNORECASE)
+            if m_same:
+                after = m_same.group(1)
+                project_number = after
+
+            j = i + 1
+            while not project_number and j < len(text_list):
+                nxt = text_list[j].strip()
+                if not nxt:
+                    j += 1
+                    continue
+                if re.search(r"CPT\.", nxt, re.IGNORECASE):
+                    project_number = nxt
+                break
+
+            if i + 1 < len(text_list):
+                proposal_project_type = text_list[i + 1].strip() or None
+            if i + 2 < len(text_list):
+                location = text_list[i + 2].strip() or None
+
+            break 
+
+    # ---------- Proposal Project Type + Location ----------
+    proposal_project_type = None
+    location = None
+    for i, line in enumerate(text_list):
+        u = line.upper()
+
+        if "FED AID NO" in u and "STATE FUNDED" in u:
+            if i + 1 < len(text_list):
+                proposal_project_type = text_list[i + 1].strip() or None
+            if i + 2 < len(text_list):
+                location = text_list[i + 2].strip() or None
+            break
+
+    counties = None
+    for line in text_list:
+        raw = line.strip()
+        u = raw.upper()
+        if (
+            "," in raw
+            and not any(ch.isdigit() for ch in raw) 
+            and "MILES" not in u
+            and "$" not in raw
+        ):
+            counties = raw
+            break
+
+
+
+    lines = [re.sub(r"\s+", " ", l.strip()) for l in text_list if l and l.strip()]
+    raw_lines = [l.strip() for l in text_list if l and l.strip()]
+
+    # ---------- bidder names  ----------
+    vendor_names = []
+
+    if not vendor_names:
+        first_item_idx = None
+        for i, raw in enumerate(raw_lines):
+            if re.match(r"\d{4}\s", raw):   # ex.: "0001 0000100000-N ..."
+                first_item_idx = i
+                break
+
+        if first_item_idx is not None:
+            start = max(0, first_item_idx - 8)
+            for idx in range(start, first_item_idx):
+                txt = raw_lines[idx].strip()
+                u = txt.upper()
+
+                if any(k in u for k in ["TIP NO", "FED AID", "ROADWAY ITEMS", "MILES", "CALL NUMBER"]):
+                    continue
+
+                if any(tag in u for tag in [" INC", " LLC", " CO ", " COMPANY", " CORP"]) and not re.search(r"\d", txt):
+                    
+                    vendor_lines = [txt]
+                    j = idx + 1
+                    while j < first_item_idx:
+                        nxt = raw_lines[j].strip()
+                        u2 = nxt.upper()
+                        if not nxt:
+                            break
+                        if any(tag in u2 for tag in [" INC", " LLC", " CO ", " COMPANY", " CORP"]) and not re.search(r"\d", nxt):
+                            vendor_lines.append(nxt)
+                            j += 1
+                            continue
+                        break
+
+                    vendor_block = " ".join(vendor_lines)
+
+                    tokens = vendor_block.split()
+                    end_words = {
+                        "INC", "INC.", "LLC", "LLC.", "CO", "CO.",
+                        "COMPANY", "CORP", "CORPORATION", "LTD", "LTD."
+                    }
+
+                    current = []
+                    for tok in tokens:
+                        current.append(tok)
+                        if tok.upper() in end_words:
+                            name = " ".join(current).strip()
+                            if re.search(r"[A-Z]", name):
+                                vendor_names.append(name)
+                            current = []
+
+                    if current:
+                        name = " ".join(current).strip()
+                        if re.search(r"[A-Z]", name):
+                            vendor_names.append(name)
+
+                    break  
+
+    seen = set()
+    vendor_names = [v for v in vendor_names if not (v in seen or seen.add(v))]
+    n_bidders = len(vendor_names)
+
+    def _is_money(tok: str) -> bool:
+        return bool(re.fullmatch(r"\$?[\d,]+\.\d{2}", tok))
+    
+    def _is_numeric(tok: str) -> bool:
+        return bool(re.fullmatch(r"\d+(?:\.\d+)?", tok.replace(",", "")))
+    
+
+    records = []
+
+    for line in lines:
+        tokens = line.split()
+        if len(tokens) < 6:
+            continue
+
+        if not re.fullmatch(r"\d{3,4}", tokens[0]):
+            continue
+
+        money_idx = [i for i, t in enumerate(tokens) if _is_money(t)]
+        if len(money_idx) < 2:   
+            continue
+
+        first_money_idx = money_idx[0]
+        core_tokens = tokens[:first_money_idx]
+        bidder_money_tokens = tokens[first_money_idx:]
+
+        # --- qty + unit dentro de core_tokens ---
+        qty = None
+        unit = None
+        head_tokens = core_tokens
+
+        if len(core_tokens) >= 2:
+            last = core_tokens[-1]
+            prev = core_tokens[-2]
+
+            # caso 1: qty numeric + unit text  → "380,471 SY"
+            if _is_numeric(prev) and not _is_numeric(last):
+                qty = prev
+                unit = last
+                head_tokens = core_tokens[:-2]
+
+            # caso 2: qty textual + unit textual (ex.: "Lump Sum")
+            elif not _is_numeric(prev) and not _is_numeric(last):
+                qty = f"{prev} {last}"
+                unit = None
+                head_tokens = core_tokens[:-2]
+
+            # caso 3: qty numeric  → "890"
+            elif _is_numeric(last):
+                qty = last
+                unit = None
+                head_tokens = core_tokens[:-1]
+
+        line_no = head_tokens[0] if len(head_tokens) > 0 else None
+        item_no = head_tokens[1] if len(head_tokens) > 1 else None
+        description = " ".join(head_tokens[3:]) if len(head_tokens) > 3 else None
+
+        qty_val = None
+        if qty is not None and _is_numeric(qty):
+            try:
+                qty_val = float(qty.replace(",", ""))
+            except Exception:
+                qty_val = None
+        unit_val = unit
+
+        numeric_tokens = [t for t in bidder_money_tokens if _is_money(t)]
+        bidder_pairs = []
+
+        if n_bidders >= 1 and len(numeric_tokens) >= 2 * n_bidders:
+            numeric_tokens = numeric_tokens[-2 * n_bidders:]
+            for i in range(n_bidders):
+                up_tok = numeric_tokens[2 * i]
+                amt_tok = numeric_tokens[2 * i + 1]
+                up_val = parse_float(up_tok)
+                amt_val = parse_float(amt_tok)
+                bidder_pairs.append((up_val, amt_val))
+
+        else:
+            # fallback: assume 1 bidder
+            if len(numeric_tokens) >= 2:
+                up_val = parse_float(numeric_tokens[-2])
+                amt_val = parse_float(numeric_tokens[-1])
+                bidder_pairs.append((up_val, amt_val))
+        for idx_b, (up_val, amt_val) in enumerate(bidder_pairs):
+            bidder_index = idx_b + 1
+            bidder_name = vendor_names[idx_b] if idx_b < len(vendor_names) else None
+
+            records.append({
+                "company_id": company_id,
+                "country": country,
+                "processed_date": processed_date,
+                "file": file_path,
+                "doc_type": "nc_bid_tabs",
+                "letting_date": letting_date,
+                "contract_id": contract_id,
+                "project_number": project_number,
+                "proposal_project_type": proposal_project_type,
+                "location": location,
+                "call_number": call_number,
+                "counties": counties,
+                "line_no": line_no,
+                "item_no": item_no,
+                "description": description,
+                "qty": qty_val if qty_val is not None else qty,
+                "unit": unit_val,
+                "vendor_name": bidder_name,
+                "unit_price": up_val,
+                "amount": amt_val,
+            })
+
+    if not records:
+        records.append({
+            "company_id": company_id,
+            "country": country,
+            "processed_date": processed_date,
+            "file": file_path,
+            "doc_type": "nc_bid_tabs",
+            "letting_date": letting_date,
+            "contract_id": contract_id,
+            "project_number": project_number,
+            "proposal_project_type": proposal_project_type,
+            "location": location,
+            "call_number": call_number,
+            "counties": counties,
+            "line_no": None,
+            "item_no": None,
+            "description": None,
+            "qty": None,
+            "unit": None,
+            "vendor_name": None,
+            "unit_price": None,
+            "amount": None,
+        })
+
+    print(f"   ➜ NC Bid Tabs parsed {len(records)} rows")
+    return records
+
+
+def extract_generic_owner_header(text_list):
+
+
+    state_header = None
+    owner_header = None
+
+    norm = [t.strip() for t in text_list if t.strip()]
+
+    for i, line in enumerate(norm):
+        u = line.upper()
+
+        if u.startswith("STATE OF"):
+            state_header = line.strip()
+
+            if i + 1 < len(norm):
+                nxt = norm[i+1].strip()
+                if any(k in nxt.upper() for k in ["DEPARTMENT", "TRANSPORTATION", "HIGHWAY"]):
+                    owner_header = nxt
+            break
+
+        if "DEPARTMENT OF TRANSPORTATION" in u:
+            owner_header = line.strip()
+
+            if i > 0:
+                prev = norm[i-1].strip()
+                if prev.upper().startswith("STATE OF"):
+                    state_header = prev
+
+            if state_header is None:
+                m = re.search(r"(NORTH|SOUTH|EAST|WEST)?\s*([A-Z][A-Za-z]+)\s+DEPARTMENT OF TRANSPORTATION", u)
+                if m:
+                    # ex: NORTH CAROLINA ...
+                    possible_state = line.split("DEPARTMENT")[0].strip()
+                    state_header = possible_state
+
+            break
+
+        # --- "DEPARTMENT OF HIGHWAYS"  ---
+        if "DEPARTMENT OF HIGHWAYS" in u:
+            owner_header = line.strip()
+
+            if i > 0:
+                prev = norm[i-1].strip()
+                if prev.upper().startswith("STATE OF"):
+                    state_header = prev
+            break
+
+    return state_header, owner_header
+
+
+
+def parse_nc_item_c(text_list, company_id, country, processed_date, file_path):
+    """
+      contract_id, division, letting_date,  project_number,
+      proposal_project_type, proposal_description, location,
+      owner_cost_estimate, date_available, final_completion,
+       vendor_name, bid_value
+    """
+
+    if not text_list:
+        return [{
+            "company_id": company_id,
+            "country": country,
+            "processed_date": processed_date,
+            "file": file_path,
+            "doc_type": "nc_item_c",
+            "state_header": None,
+            "owner_header": None,
+            "letting_date": None,
+            "contract_id": None,
+            "project_number": None,
+            "proposal_project_type": None,
+            "proposal_description": None,
+            "location": None,
+            "owner_cost_estimate": None,
+            "date_available": None,
+            "final_completion": None,
+            "vendor_name": None,
+            "bid_value": None,
+        }]
+
+    full_text = "\n".join(text_list)
+    lines = [l.strip() for l in text_list if l and l.strip()]
+
+    upper_full = full_text.upper()
+
+    state_header, owner_header = extract_generic_owner_header(text_list)
+
+
+    letting_date = None
+    m_date = re.search(
+        r"((?:JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+\d{1,2},\s+\d{4})",
+        full_text,
+        flags=re.IGNORECASE,
+    )
+    if m_date:
+        letting_raw = m_date.group(1).strip()      # ex.: "MAY 3, 2023"
+        letting_date = parse_date(letting_raw) or letting_raw
+    else:
+        letting_date = None
+
+    # ---------- Local helper ----------
+    def _find(pattern, text, flags=re.IGNORECASE):
+        m = re.search(pattern, text, flags)
+        return m.group(1).strip() if m else None
+
+    contract_idxs = [i for i, l in enumerate(lines) if re.fullmatch(r"DA\d{5}", l)]
+    contract_idxs.append(len(lines))  # sentinela
+
+    records = []
+
+    for k in range(len(contract_idxs) - 1):
+        start = contract_idxs[k]
+        end = contract_idxs[k + 1]
+        block_lines = lines[start:end]
+        block_text = "\n".join(block_lines)
+
+        contract_id = block_lines[0] if block_lines else None
+
+
+    project_number = None 
+  
+
+    for k in range(len(contract_idxs) - 1):
+        start = contract_idxs[k]
+        end = contract_idxs[k + 1]
+
+        block_lines = [l for l in lines[start:end] if l.strip()]
+        block_text  = "\n".join(block_lines)
+
+        contract_id = block_lines[0] if block_lines else None
+
+        # ---------------- PROJECT NUMBER & COUNTY ----------------
+        project_number = None
+        county = None
+
+        SPECIAL_PROJECT_PATTERNS = [
+            "BERTIE, HERTFORD, NORTHAMPTON",
+            "STATE FUNDED",
+            "HERTFORD",
+            "PASQUOTANK",
+        ]
+
+        for i, raw in enumerate(block_lines):
+            line = raw.strip()
+            u = line.upper()
+
+            found_special = False
+            for pat in SPECIAL_PROJECT_PATTERNS:
+                if pat in u:
+                    project_number = pat                     
+                    if i + 1 < len(block_lines):
+                        county = block_lines[i + 1].strip()  
+                    found_special = True
+                    break
+
+            if found_special:
+                break
+
+            if "FED AID NO" in u or "FEDERAL AID" in u:
+                m = re.search(r"FED(?:ERAL)? AID NO[:\s]*(.*)", line, flags=re.IGNORECASE)
+                if m and m.group(1).strip():
+                    project_number = m.group(1).strip()
+                else:
+                    project_number = line.strip()
+
+                if i + 1 < len(block_lines):
+                    county = block_lines[i + 1].strip()
+                break
+
+
+        
+        proposal_description = None
+        location = None
+
+        for i, raw in enumerate(block_lines):
+            line = raw.strip()
+            u = line.upper()
+
+            # TYPE OF WORK
+            if u.startswith("TYPE OF WORK"):
+                m = re.search(r"TYPE OF WORK\s*(.*)", line, flags=re.IGNORECASE)
+                if m and m.group(1).strip():
+                    proposal_description = m.group(1).strip()
+                elif i + 1 < len(block_lines):
+                    nxt = block_lines[i + 1].strip()
+                    if nxt:
+                        proposal_description = nxt
+                continue
+
+            # LOCATION
+            if u.startswith("LOCATION"):
+                m = re.search(r"LOCATION\s*(.*)", line, flags=re.IGNORECASE)
+                if m and m.group(1).strip():
+                    location = m.group(1).strip()
+                elif i + 1 < len(block_lines):
+                    nxt = block_lines[i + 1].strip()
+                    if nxt:
+                        location = nxt
+                continue
+
+            # -------- LOCATION --------
+            if u.startswith("LOCATION"):
+                m = re.search(r"LOCATION\s*(.*)", line, flags=re.IGNORECASE)
+                if m and m.group(1).strip():
+                    location = m.group(1).strip()
+                else:
+                    if i + 1 < len(text_list):
+                        nxt = text_list[i + 1].strip()
+                        if nxt:
+                            location = nxt
+                continue
+
+
+        owner_cost_estimate = _find(r"ESTIMATE\s+([\d,]+\.\d{2})", block_text)
+        final_completion = _find(r"FINAL COMPLETION\s+(.+)", block_text)
+
+        # ---------- Vendors + values ----------
+        vendor_lines = []
+        in_vendors = False
+        for l in block_lines:
+            u = l.upper()
+            if "$ TOTALS" in u:
+                in_vendors = True
+                continue
+            if not in_vendors:
+                continue
+
+
+            if u.startswith("ESTIMATE TOTAL") or u.startswith("LETTING TOTAL"):
+                break
+
+
+            if re.search(r"[\d,]+\.\d{2}", l):
+                vendor_lines.append(l)
+
+        for l in vendor_lines:
+   
+            nums = re.findall(r"[\d,]+\.\d{2}", l)
+            if not nums:
+                continue
+            bid_value = parse_float(nums[0])
+
+            tmp = re.sub(r"\s*[-+]?\d+(\.\d+)?\s*$", "", l)
+
+            tmp = re.sub(r"\s*[\d,]+\.\d{2}\s*$", "", tmp)
+            vendor_name = tmp.strip()
+
+            records.append({
+                "company_id": company_id,
+                "country": country,
+                "processed_date": processed_date,
+                "file": file_path,
+                "doc_type": "nc_item_c",
+                "state_header": state_header,
+                "owner_header": owner_header,
+                "letting_date": letting_date,
+                "contract_id": contract_id,
+                "project_number": project_number,
+                "proposal_description": proposal_description,
+                "location": location,
+                "owner_cost_estimate": owner_cost_estimate,
+                "final_completion": final_completion,
+                "vendor_name": vendor_name,
+                "bid_value": bid_value,
+            })
+
+    if not records:
+        records.append({
+            "company_id": company_id,
+            "country": country,
+            "processed_date": processed_date,
+            "file": file_path,
+            "doc_type": "nc_item_c",
+            "state_header": state_header,
+            "owner_header": owner_header,
+            "letting_date": letting_date,
+            "contract_id": None,
+            "project_number": project_number,
+            "proposal_description": None,
+            "location": None,
+            "owner_cost_estimate": None,
+            "final_completion": None,
+            "vendor_name": None,
+            "bid_value": None,
+        })
+
+    print(f"   ➜ NC Item C parsed {len(records)} rows")
+    return records
+
+
+
+
+def parse_nc_invitation_to_bid(text_list, company_id, country, processed_date, file_path):
+    """
+    Parser 'Invitation to Bid' / 'NOTICE TO PROSPECTIVE BIDDERS'.
+      state_header, owner_header,
+      division,
+      contract_id,               # 12089199 or DA00565 
+      proposal_description,      # contract_id ("Milling, Surfacing, ...")
+      completion_date,           # "The Completion Date for this Contract is ..."
+      letting_date               # Bid Opening (on <date>)
+    """
+
+    if not text_list:
+        return [{
+            "company_id": company_id,
+            "country": country,
+            "processed_date": processed_date,
+            "file": file_path,
+            "doc_type": "nc_invitation_to_bid",
+            "state_header": None,
+            "owner_header": None,
+            "division": None,
+            "contract_id": None,
+            "proposal_description": None,
+            "completion_date": None,
+            "letting_date": None,
+        }]
+
+    full_text = "\n".join(text_list)
+    lines = [l.strip() for l in text_list if l and l.strip()]
+
+    # ---------- Headers (STATE + OWNER) ----------
+
+    state_header, owner_header = extract_generic_owner_header(text_list)
+
+    # ----------  (MAY 3, 2023 etc.) ----------
+    date_pat = r"((?:JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+\d{1,2},\s+\d{4})"
+
+    # ---------- DIVISION ----------
+    division = None
+    for line in lines:
+        u = line.upper()
+        if "DIVISION" in u:
+            # ex.: "Division One:" or "DIVISION 1"
+            division = line.strip().rstrip(":")
+            break
+
+    # ---------- CONTRACT ID + PROPOSAL DESCRIPTION ----------
+    contract_id = None
+    proposal_description = None
+    
+
+    req_idx = None
+    for i, raw in enumerate(lines):
+        u = raw.upper()
+        if "REQUESTING BIDS FOR THE" in u:
+            req_idx = i
+            break
+
+    if req_idx is not None:
+        j = req_idx + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        if j < len(lines):
+            candidate = lines[j]
+            # padrão: "12089199 – Milling, Surfacing, ..."
+            m = re.match(r"\s*(\S+)\s*[–\-]\s*(.+)", candidate)
+            if m:
+                contract_id = m.group(1).strip()
+                proposal_description = m.group(2).strip()
+
+    if contract_id is None:
+        for raw in lines:
+            txt = raw.strip()
+
+            # 1) Caso especial: "12107176 / MA00004 – Alguma descrição"
+            m_combo = re.match(
+                r"\s*(\d{6,})\s*/\s*([A-Z]{2}\d{4,})\s*[–\-]\s*(.+)",  # proj / MA00004 – desc
+                txt,
+                flags=re.IGNORECASE,
+            )
+            if m_combo:
+                project_number = m_combo.group(1).strip()          # 12107176
+                contract_id = m_combo.group(2).strip()             # MA00004
+                proposal_description = m_combo.group(3).strip()    # texto após o "–"
+                break
+
+            # 2) Formatos antigos:
+            #    "DA00569 – Descrição"
+            #    "12089199 – Descrição"
+            m = re.match(
+                r"\s*([A-Z]{2}\d{4,}|\d{5,})\s*[–\-]\s*(.+)",
+                txt,
+                flags=re.IGNORECASE,
+            )
+            if m:
+                contract_id = m.group(1).strip()
+                proposal_description = m.group(2).strip()
+                break
+
+
+
+    # ---------- COMPLETION DATE ----------
+    completion_date = None
+
+    m_comp = re.search(
+        r"Completion Date.*?(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}",
+        full_text,
+        flags=re.IGNORECASE,
+    )
+
+    if m_comp:
+        m_c2 = re.search(
+            r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}",
+            m_comp.group(0),
+            flags=re.IGNORECASE,
+        )
+        if m_c2:
+            comp_raw = m_c2.group(0)
+            completion_date = parse_date(comp_raw) or comp_raw
+
+  # -------- LETTING DATE (Bid Opening ...) --------
+    letting_date = None
+
+    m_date = re.search(
+        r"Bid Opening.*?(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}",
+        full_text,
+        flags=re.IGNORECASE,
+    )
+
+    if m_date:
+        letting_str = m_date.group(0)
+        m2 = re.search(
+            r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}",
+            letting_str,
+            flags=re.IGNORECASE,
+        )
+        if m2:
+            letting_raw = m2.group(0).strip()
+            letting_date = parse_date(letting_raw) or letting_raw
+
+    record = {
+        "company_id": company_id,
+        "country": country,
+        "processed_date": processed_date,
+        "file": file_path,
+        "doc_type": "nc_invitation_to_bid",
+        "state_header": state_header,
+        "owner_header": owner_header,
+        "division": division,
+        "contract_id": contract_id,
+        "proposal_description": proposal_description,
+        "completion_date": completion_date,
+        "letting_date": letting_date,
+    }
+
+    print("   ➜ NC Invitation to Bid parsed 1 row")
+    return [record]
+
+
+
+
+def parse_document_by_type(
+    doc_type: str,
+    text_list: list,
+    df_img,
+    company_id,
+    country,
+    processed_date,
+    file_path,
+):
+
+    if doc_type == "nc_award_letter":
+        return parse_nc_award_letter(
+            text_list=text_list,
+            company_id=company_id,
+            country=country,
+            processed_date=processed_date,
+            file_path=file_path,
+        )
+    
+    if doc_type == "nc_bids_as_read":
+        return parse_nc_bids_as_read(
+            text_list=text_list,
+            company_id=company_id,
+            country=country,
+            processed_date=processed_date,
+            file_path=file_path,
+        )
+    
+    if doc_type == "nc_bid_tabs":
+        return parse_nc_bid_tabs(
+            text_list=text_list,
+            company_id=company_id,
+            country=country,
+            processed_date=processed_date,
+            file_path=file_path,
+        )
+    
+    if doc_type == "nc_item_c":
+        return parse_nc_item_c(
+            text_list=text_list,
+            company_id=company_id,
+            country=country,
+            processed_date=processed_date,
+            file_path=file_path,
+        )
+    
+    if doc_type == "nc_invitation_to_bid":
+        return parse_nc_invitation_to_bid(
+            text_list=text_list,
+            company_id=company_id,
+            country=country,
+            processed_date=processed_date,
+            file_path=file_path,
+        )
+
+
+    return [{
+        "company_id": company_id,
+        "country": country,
+        "processed_date": processed_date,
+        "file": file_path,
+        "doc_type": doc_type,
+        "raw_text": "\n".join(text_list) if text_list else None,
+    }]
